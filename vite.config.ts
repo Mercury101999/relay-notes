@@ -3,7 +3,7 @@ import { readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import react from '@vitejs/plugin-react';
 import { defineConfig, type Plugin } from 'vitest/config';
-import { shouldPrecache, VOICE_CACHE } from './src/core/precache';
+import { SHELL_REVISION, shouldPrecache, VOICE_CACHE } from './src/core/precache';
 
 const CSP = [
   "default-src 'self'",
@@ -40,9 +40,9 @@ function offline(): Plugin {
       const publics = walk('public').map((file) => relative('public', file).split('\\').join('/'));
       const files = [...bundled, ...publics].filter((file) => shouldPrecache(file));
       const list = [...new Set(['./index.html', ...files.map((file) => `./${file}`)])];
-      const version = createHash('sha256').update(list.join('|')).digest('hex').slice(0, 12);
+      const version = createHash('sha256').update(`${SHELL_REVISION}|${list.join('|')}`).digest('hex').slice(0, 12);
       const sw = `// Generated app shell. Voice model files are not precached.
-const CACHE = 'relay-shell-${version}';
+const CACHE = 'relay-shell-${SHELL_REVISION}-${version}';
 const VOICE = '${VOICE_CACHE}';
 const ASSETS = ${JSON.stringify(list)};
 self.addEventListener('install', (event) => {

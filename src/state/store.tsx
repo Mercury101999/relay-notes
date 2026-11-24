@@ -6,7 +6,7 @@ import { deleteFolder, moveFolder as reorderFolder, wouldCycle } from '../core/f
 import { emptyWorkspace, upgradeSettings, withBody } from '../core/factory';
 import { idbGet, idbSet } from '../core/idb';
 import { applyUndo, type OrganizeUndo } from '../core/undo';
-import { executeSync } from '../core/sync';
+import { describeSyncErrors, executeSync } from '../core/sync';
 import { asSyncClient, createRelayClient } from '../core/supabase';
 import { nowIso } from '../core/time';
 import type { Bot, Folder, Note, QueueItem, Settings, Theme, Tombstone, Workspace } from '../core/types';
@@ -24,7 +24,7 @@ interface StoreValue {
   ws: Workspace;
   ready: boolean;
   user: SessionUser | null;
-  sync: { status: SyncPill; error: string | null; at: string | null };
+  sync: { status: SyncPill; error: string | null; at: string | null; tables?: string[] };
   pagesOrigin: string;
   syncNow: () => Promise<void>;
   signIn: (email: string, password: string) => Promise<string>;
@@ -143,7 +143,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     try {
       const outcome = await executeSync(asSyncClient(client()), currentUser.id, wsRef.current);
       setWs(outcome.workspace);
-      setSync({ status: 'synced', error: null, at: nowIso() });
+      if (outcome.errors.length) {
+        setSync({ status: 'error', error: describeSyncErrors(outcome.errors), at: nowIso(), tables: outcome.errors.map((item) => item.table) });
+      } else {
+        setSync({ status: 'synced', error: null, at: nowIso() });
+      }
     } catch (error) {
       setSync({ status: 'error', error: (error as Error).message, at: null });
     } finally {

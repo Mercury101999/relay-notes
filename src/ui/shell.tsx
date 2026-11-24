@@ -41,7 +41,7 @@ export function Shell() {
   }
 
   const page = route.page === 'notes' && route.noteId ? 'notes' : route.page;
-  const label = !navigator.onLine ? 'Offline' : !user ? 'On this device' : sync.status === 'syncing' ? 'Syncing' : sync.status === 'error' ? 'Sync issue' : sync.status === 'synced' ? 'Synced' : 'On this device';
+  const label = !navigator.onLine ? 'Offline' : !user ? 'On this device' : sync.status === 'syncing' ? 'Syncing' : sync.status === 'error' ? (sync.tables?.length ? `Sync issue: ${sync.tables.join(', ')}` : 'Sync issue') : sync.status === 'synced' ? 'Synced' : 'On this device';
 
   return (
     <div className="app">
@@ -54,14 +54,14 @@ export function Shell() {
             </button>
           ))}
         </nav>
-        <button type="button" className={`sync-pill ${sync.status}`} onClick={() => void syncNow()}>
+        <button type="button" className={`sync-pill ${sync.status}`} onClick={() => void syncNow()} title={sync.error ?? undefined}>
           <i /> {label}
         </button>
       </aside>
       <div className="frame">
         <header className="topbar">
           <div className="brand">Relay <span>Notes</span></div>
-          <button type="button" className={`sync-pill ${sync.status}`} onClick={() => void syncNow()} aria-live="polite">
+          <button type="button" className={`sync-pill ${sync.status}`} onClick={() => void syncNow()} aria-live="polite" title={sync.error ?? undefined}>
             <i /> {label}
           </button>
         </header>
