@@ -1,15 +1,19 @@
 import { useMemo, useState } from 'react';
+import { applyConsolidate, blockMatches, type BlockPick, type GroupFilter } from '../core/consolidate';
 import { folderTree } from '../core/folders';
 import { makeFolder, makeNote } from '../core/factory';
 import { organizeByKeyword, sectionToPrompt } from '../core/organize';
 import type { PromptPrefill } from '../core/queue';
 import type { Route } from '../core/routes';
+import { canonicalKeyword } from '../core/routing';
 import { searchWorkspace, type SearchScope } from '../core/search';
 import { nowIso } from '../core/time';
-import type { Folder, SyncMode } from '../core/types';
+import type { Folder, Note, SyncMode } from '../core/types';
+import type { OrganizeUndo } from '../core/undo';
 import { useStore } from '../state/store';
 import { NoteEditor } from './editor';
-import { askConfirm } from './toast';
+import { askConfirm, toast } from './toast';
+import { ConsolidateDialog } from './writing';
 
 export function NotesPage({ route, go, onPrompt }: { route: Extract<Route, { page: 'notes' }>; go: (route: Route) => void; onPrompt: (prefill: PromptPrefill) => void }) {
   const store = useStore();
@@ -113,6 +117,8 @@ export function NotesPage({ route, go, onPrompt }: { route: Extract<Route, { pag
         {route.panel === 'keyword' ? (
           <KeywordBoard
             notes={ws.notes}
+            folders={ws.folders}
+            aliases={ws.settings.keyword_aliases}
             collapsed={collapsedGroups}
             onToggle={(key) => setCollapsedGroups((current) => ({ ...current, [key]: !current[key] }))}
             onOpen={(id) => go({ page: 'notes', noteId: id })}
@@ -166,46 +172,120 @@ function syncLabel(mode: SyncMode) {
 }
 
 function KeywordBoard({
-  notes, collapsed, onToggle, onOpen, onPrompt,
+  notes, folders, aliases, collapsed, onToggle, onOpen, onPrompt,
 }: {
-  notes: ReturnType<typeof useStore>['ws']['notes'];
+  notes: Note[];
+  folders: Folder[];
+  aliases: ReturnType<typeof useStore>['ws']['settings']['keyword_aliases'];
   collapsed: Record<string, boolean>;
   onToggle: (key: string) => void;
   onOpen: (id: string) => void;
   onPrompt: (prefill: PromptPrefill) => void;
 }) {
-  const groups = organizeByKeyword(notes);
+  const store = useStore();
+  const [filter, setFilter] = useState<GroupFilter>({ keywords: [], subClasses: [], tags: [], mentions: [], search: '' });
+  const [selected, setSelected] = useState<string[]>([]);
+  const [open, setOpen] = useState(false);
+  const canon = (keyword: string) => canonicalKeyword(keyword, aliases);
+  const groups = organizeByKeyword(notes, aliases);
+  const picks = useMemo(() => notes.flatMap((note) => note.parsed_sections.map((section): BlockPick => ({
+    noteId: note.id,
+    noteTitle: note.title,
+    syncMode: note.sync_mode,
+    section,
+  }))), [notes]);
+  const visible = picks.filter((pick) => blockMatches(pick, filter, canon));
+  const visibleKey = new Set(visible.map((pick) => `${pick.noteId}:${pick.section.id}`));
+  const tagOptions = [...new Set(picks.flatMap((pick) => pick.section.tags))];
+  const mentionOptions = [...new Set(picks.flatMap((pick) => pick.section.mentions))];
+  const keywordOptions = [...new Set(picks.map((pick) => canon(pick.section.keyword)))];
+  const subOptions = [...new Set(picks.map((pick) => pick.section.subClass).filter((item): item is string => !!item))];
+  function toggle(list: string[], value: string) {
+    return list.some((item) => item.toLowerCase() === value.toLowerCase()) ? list.filter((item) => item.toLowerCase() !== value.toLowerCase()) : [...list, value];
+  }
+  function confirm(input: { targetNoteId: string | null; folderId: string | null; newTitle: string; mode: 'copy' | 'archive'; privacyAccepted: boolean }) {
+    const chosen = picks.filter((pick) => selected.includes(`${pick.noteId}:${pick.section.id}`));
+    const result = applyConsolidate({ picks: chosen, ...input }, notes, folders, input.privacyAccepted, nowIso());
+    if (!result.ok) {
+      toast('Confirm the local-to-cloud warning before consolidating.');
+      return;
+    }
+    const before = new Set(result.touchedNoteIds.filter((id) => !result.createdNoteIds.includes(id)));
+    const snapshot: OrganizeUndo = {
+      id: crypto.randomUUID(),
+      kind: 'consolidate',
+      label: 'Undo consolidate',
+      created_at: nowIso(),
+      notes: notes.filter((note) => before.has(note.id)),
+      folders: [],
+      createdNoteIds: result.createdNoteIds,
+      createdFolderIds: [],
+    };
+    store.commitOrganize(result.notes, folders, snapshot);
+    setOpen(false);
+    setSelected([]);
+    toast('Blocks consolidated');
+  }
   if (!groups.length) return <p className="muted">Parsed sections will gather here by keyword.</p>;
   return (
-    <div className="stack keyword-board">
+    <div className="stack keyword-board" data-testid="group-filters">
+      <input aria-label="Filter blocks" placeholder="Filter by keyword, tag, or bot" value={filter.search} onChange={(event) => setFilter({ ...filter, search: event.target.value })} />
+      <div className="pills">
+        {keywordOptions.map((keyword) => <button key={keyword} type="button" className={filter.keywords.some((item) => item.toLowerCase() === keyword.toLowerCase()) ? 'pill on' : 'pill'} onClick={() => setFilter({ ...filter, keywords: toggle(filter.keywords, keyword) })}>{keyword}</button>)}
+        {subOptions.map((sub) => <button key={sub} type="button" className={filter.subClasses.some((item) => item.toLowerCase() === sub.toLowerCase()) ? 'pill on' : 'pill'} onClick={() => setFilter({ ...filter, subClasses: toggle(filter.subClasses, sub) })}>{sub}</button>)}
+        {tagOptions.map((tag) => <button key={tag} type="button" aria-label={`Filter tag ${tag}`} className={filter.tags.some((item) => item.toLowerCase() === tag.toLowerCase()) ? 'pill on' : 'pill'} onClick={() => setFilter({ ...filter, tags: toggle(filter.tags, tag) })}>#{tag}</button>)}
+        {mentionOptions.map((mention) => <button key={mention} type="button" aria-label={`Filter mention ${mention}`} className={filter.mentions.some((item) => item.toLowerCase() === mention.toLowerCase()) ? 'pill on' : 'pill'} onClick={() => setFilter({ ...filter, mentions: toggle(filter.mentions, mention) })}>@{mention}</button>)}
+      </div>
+      <button type="button" className="btn" disabled={!selected.length} onClick={() => setOpen(true)}>Consolidate into Note</button>
       {groups.map((group) => {
+        const items = group.items.filter((item) => visibleKey.has(`${item.noteId}:${item.section.id}`));
+        if (!items.length) return null;
         const closed = collapsed[group.keyword];
         return (
           <article key={group.keyword} className="list-card">
             <button type="button" className="kw-toggle" aria-expanded={!closed} onClick={() => onToggle(group.keyword)}>
               {closed ? '▸' : '▾'} {group.keyword}
-              <span className="muted">{group.items.length}</span>
+              <span className="muted">{items.length}</span>
             </button>
-            {!closed && group.subGroups.map((sub) => (
-              <div key={sub.subClass ?? '∅'} className="sub-group">
-                <h3>{sub.subClass ?? 'No sub-class'}</h3>
-                {sub.items.map((item) => (
-                  <div key={`${item.noteId}-${item.section.lineStart}`} className="sub-item">
-                    <div>
-                      <strong>{item.noteTitle}</strong>
-                      <span className="muted">{item.section.chapters.length} chapters</span>
-                    </div>
-                    <div className="row">
-                      <button type="button" className="btn ghost small" onClick={() => onOpen(item.noteId)}>Open note</button>
-                      <button type="button" className="btn small" onClick={() => onPrompt({ ...sectionToPrompt(item.section), source_note_id: item.noteId })}>Send to prompt</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ))}
+            {!closed && group.subGroups.map((sub) => {
+              const subItems = sub.items.filter((item) => visibleKey.has(`${item.noteId}:${item.section.id}`));
+              if (!subItems.length) return null;
+              return (
+                <div key={sub.subClass ?? '∅'} className="sub-group">
+                  <h3>{sub.subClass ?? 'No sub-class'}</h3>
+                  {subItems.map((item) => {
+                    const key = `${item.noteId}:${item.section.id}`;
+                    return (
+                      <div key={key} className="sub-item">
+                        <label className="check-line">
+                          <input type="checkbox" aria-label={`Select ${item.section.keyword} from ${item.noteTitle}`} checked={selected.includes(key)} onChange={() => setSelected((current) => current.includes(key) ? current.filter((id) => id !== key) : [...current, key])} />
+                          <span>
+                            <strong>{item.noteTitle}</strong>
+                            <span className="muted">{item.section.chapters.length} chapters{(item.section.tags ?? []).slice(0, 3).map((tag) => ` #${tag}`).join('')}{(item.section.mentions ?? []).slice(0, 3).map((mention) => ` @${mention}`).join('')}</span>
+                          </span>
+                        </label>
+                        <div className="row">
+                          <button type="button" className="btn ghost small" onClick={() => onOpen(item.noteId)}>Open note</button>
+                          <button type="button" className="btn small" onClick={() => onPrompt({ ...sectionToPrompt(item.section), source_note_id: item.noteId })}>Send to prompt</button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
           </article>
         );
       })}
+      {open && (
+        <ConsolidateDialog
+          picks={picks.filter((pick) => selected.includes(`${pick.noteId}:${pick.section.id}`))}
+          notes={notes}
+          folders={folders}
+          onClose={() => setOpen(false)}
+          onConfirm={confirm}
+        />
+      )}
     </div>
   );
 }

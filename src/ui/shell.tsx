@@ -18,7 +18,7 @@ const TABS = [
 ] as const;
 
 export function Shell() {
-  const { ready, user, sync, syncNow } = useStore();
+  const { ready, user, sync, syncNow, undo, undoOrganize } = useStore();
   const [route, setRoute] = useState<Route>(() => parseRoute(window.location.hash));
   const [prefill, setPrefill] = useState<PromptPrefill | null>(null);
 
@@ -66,6 +66,12 @@ export function Shell() {
           </button>
         </header>
         <main>
+          {undo && (
+            <div className="undo-banner" data-testid="undo-organize">
+              <span>{undo.kind === 'disperse' ? 'Disperse is saved on this device.' : 'Consolidate is saved on this device.'}</span>
+              <button type="button" onClick={() => undoOrganize()}>{undo.kind === 'disperse' ? 'Undo disperse' : 'Undo consolidate'}</button>
+            </div>
+          )}
           {!ready ? <p className="muted page">Opening your workspace…</p> : (
             <>
               {route.page === 'home' && <HomePage go={go} onPrompt={openPrompt} />}

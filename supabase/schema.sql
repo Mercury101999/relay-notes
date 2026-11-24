@@ -58,6 +58,8 @@ create table if not exists public.notes (
   body text not null default '',
   parsed_sections jsonb not null default '[]'::jsonb,
   keywords text[] not null default '{}',
+  tags text[] not null default '{}',
+  mentions text[] not null default '{}',
   sync_mode text not null default 'ari_inbox' check (sync_mode in ('local', 'ari_inbox', 'ari_reference')),
   triage_status text not null default 'raw' check (triage_status in ('none', 'raw', 'organized', 'archived')),
   ari_summary text,
@@ -90,6 +92,10 @@ create table if not exists public.user_settings (
   theme text not null default 'dark' check (theme in ('dark', 'light')),
   voice_dictionary jsonb not null default '[]'::jsonb,
   voice_commands_enabled boolean not null default true,
+  routing_rules jsonb not null default '[]'::jsonb,
+  keyword_aliases jsonb not null default '[]'::jsonb,
+  templates jsonb not null default '[]'::jsonb,
+  format_on_save boolean not null default false,
   updated_at timestamptz not null default now()
 );
 
@@ -97,6 +103,16 @@ create index if not exists folders_user_idx on public.folders (user_id, parent_i
 create index if not exists bots_user_idx on public.bots (user_id, status);
 create index if not exists notes_user_idx on public.notes (user_id, sync_mode, triage_status);
 create index if not exists notes_folder_idx on public.notes (folder_id);
+create index if not exists notes_tags_idx on public.notes using gin (tags);
+create index if not exists notes_mentions_idx on public.notes using gin (mentions);
+
+-- Additive columns for databases created before the writing tools.
+alter table public.notes add column if not exists tags text[] not null default '{}';
+alter table public.notes add column if not exists mentions text[] not null default '{}';
+alter table public.user_settings add column if not exists routing_rules jsonb not null default '[]'::jsonb;
+alter table public.user_settings add column if not exists keyword_aliases jsonb not null default '[]'::jsonb;
+alter table public.user_settings add column if not exists templates jsonb not null default '[]'::jsonb;
+alter table public.user_settings add column if not exists format_on_save boolean not null default false;
 create index if not exists queue_user_idx on public.queue_items (user_id, status, bot_name);
 
 drop trigger if exists folders_updated_at on public.folders;

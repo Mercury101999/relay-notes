@@ -1,13 +1,22 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { applyDisperse } from '../core/disperse';
+import { formatNote } from '../core/format';
 import { chapterChip, chapterKey, emptyFoldState, expandSection, isChapterCollapsed, isSectionCollapsed, sectionKey, summaryChip, toggleChapter, toggleSection, type FoldState } from '../core/fold';
 import { addHighlightWord, cycleIndex, findOccurrences, removeHighlightWord, rulerFraction, wordAt, type Occurrence } from '../core/highlight';
-import { chapterBodyRanges, replaceChapterBody, replaceRange, sectionOffsets } from '../core/parser';
+import { chapterBodyRanges, parseNoteBody, replaceChapterBody, replaceRange, sectionOffsets } from '../core/parser';
 import { SYNC_LABEL, withBody } from '../core/factory';
 import { applySyncMode } from '../core/sync';
+import { snippetFromSelection } from '../core/templates';
 import { nowIso } from '../core/time';
 import type { Folder, Note, SyncMode, VoiceRule } from '../core/types';
+import type { OrganizeUndo } from '../core/undo';
+import type { WrapKind } from '../core/wrap';
+import { wrapSelection } from '../core/wrap';
+import { useStore } from '../state/store';
 import { openVoice } from '../voice/voice';
 import { IconMic } from './icons';
+import { toast } from './toast';
+import { DisperseDialog, QuickBar, SnippetDialog, TemplateDrawer } from './writing';
 
 interface Props {
   note: Note;
@@ -20,13 +29,18 @@ interface Props {
 }
 
 export function NoteEditor({ note, folders, rules, commands, onChange, onBack, onDelete }: Props) {
+  const store = useStore();
   const [mode, setMode] = useState<'fold' | 'source'>('fold');
   const [fold, setFold] = useState<FoldState>(emptyFoldState);
   const [words, setWords] = useState<string[]>([]);
   const [cursors, setCursors] = useState<Record<string, number>>({});
   const [jump, setJump] = useState<number | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
+  const [templatesOpen, setTemplatesOpen] = useState(false);
+  const [disperseOpen, setDisperseOpen] = useState(false);
+  const [snippet, setSnippet] = useState<string | null>(null);
   const sourceRef = useRef<HTMLTextAreaElement>(null);
+  const diagnostics = useMemo(() => parseNoteBody(note.body).diagnostics, [note.body]);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const occurrences = useMemo(() => findOccurrences(note.body, words), [note.body, words]);
   const hold = useRef({ timer: 0, fired: false });
@@ -107,6 +121,78 @@ export function NoteEditor({ note, folders, rules, commands, onChange, onBack, o
     jumpTo(list[next].start);
   }
 
+  function maybeFormat(body: string) {
+    if (!store.ws.settings.format_on_save) return;
+    const result = formatNote(body, store.ws.settings.keyword_aliases);
+    if (!result.diagnostics.length && result.text !== body) commit(withBody(note, result.text, nowIso()));
+  }
+
+  function formatNow() {
+    const result = formatNote(note.body, store.ws.settings.keyword_aliases);
+    if (result.diagnostics.length) {
+      toast('Unclosed block. The note was left unchanged.');
+      return;
+    }
+    if (result.changed) commit(withBody(note, result.text, nowIso()));
+  }
+
+  function applyWrap(kind: WrapKind) {
+    const area = sourceRef.current;
+    const start = mode === 'source' && area ? area.selectionStart : note.body.length;
+    const end = mode === 'source' && area ? area.selectionEnd : note.body.length;
+    const result = wrapSelection(note.body, start, end, kind);
+    setMode('source');
+    commit(withBody(note, result.text, nowIso()));
+    window.setTimeout(() => {
+      const next = sourceRef.current;
+      if (!next) return;
+      next.focus();
+      next.setSelectionRange(result.selectionStart, result.selectionEnd);
+    }, 0);
+  }
+
+  function insertTemplate(body: string) {
+    const area = sourceRef.current;
+    const start = mode === 'source' && area ? area.selectionStart : note.body.length;
+    const end = mode === 'source' && area ? area.selectionEnd : note.body.length;
+    const chunk = body.endsWith('\n') ? body : `${body}\n`;
+    setMode('source');
+    commit(withBody(note, note.body.slice(0, start) + chunk + note.body.slice(end), nowIso()));
+    setTemplatesOpen(false);
+  }
+
+  function saveSnippet(name: string, category: string, body: string) {
+    const template = { ...snippetFromSelection(name, body, nowIso(), category) };
+    store.updateSettings({ templates: [...store.ws.settings.templates, template] });
+    setSnippet(null);
+    toast('Snippet saved on this device');
+  }
+
+  function confirmDisperse(rows: Parameters<typeof applyDisperse>[1], disperseMode: 'move' | 'copy', privacyAccepted: boolean) {
+    const settings = store.ws.settings;
+    const result = applyDisperse(note, rows, store.ws.notes, store.ws.folders, settings.routing_rules, settings.keyword_aliases, disperseMode, privacyAccepted, nowIso());
+    if (!result.ok) {
+      toast('Confirm the local-to-cloud warning before dispersing.');
+      return;
+    }
+    const before = new Set(result.touchedNoteIds.filter((id) => !result.createdNoteIds.includes(id)));
+    const snapshot: OrganizeUndo = {
+      id: crypto.randomUUID(),
+      kind: 'disperse',
+      label: 'Undo disperse',
+      created_at: nowIso(),
+      notes: store.ws.notes.filter((item) => before.has(item.id)),
+      folders: [],
+      createdNoteIds: result.createdNoteIds,
+      createdFolderIds: result.createdFolderIds,
+      settings: rows.some((row) => row.saveRule) ? settings : undefined,
+    };
+    store.commitOrganize(result.notes, result.folders, snapshot);
+    if (rows.some((row) => row.saveRule)) store.updateSettings({ routing_rules: result.rules });
+    setDisperseOpen(false);
+    toast(disperseMode === 'move' ? 'Blocks dispersed' : 'Blocks copied');
+  }
+
   function insertDictation(text: string) {
     const area = sourceRef.current;
     if (mode === 'source' && area && document.activeElement === area) {
@@ -170,7 +256,7 @@ export function NoteEditor({ note, folders, rules, commands, onChange, onBack, o
   return (
     <article className="editor" data-testid="note-editor">
       <div className="editor-toolbar">
-        <button type="button" className="btn ghost small" onClick={onBack}>Back</button>
+        <button type="button" className="btn ghost small" onClick={() => { maybeFormat(note.body); onBack(); }}>Back</button>
         <div className="seg">
           <button type="button" className={mode === 'fold' ? 'on' : ''} onClick={() => setMode('fold')} aria-pressed={mode === 'fold'}>Fold</button>
           <button type="button" className={mode === 'source' ? 'on' : ''} onClick={() => setMode('source')} aria-pressed={mode === 'source'}>Source</button>
@@ -226,10 +312,27 @@ export function NoteEditor({ note, folders, rules, commands, onChange, onBack, o
             ? 'Ari Inbox. The note syncs as raw until Ari organizes it.'
             : 'Ari Reference. Synced as a non-private reference.'}
       </p>
-      {!!note.keywords.length && (
+      {!!(note.keywords.length || note.tags?.length || note.mentions?.length) && (
         <div className="tags" aria-label="Keywords">
           {note.keywords.map((keyword) => <span key={keyword} className="tag">{keyword}</span>)}
+          {(note.tags ?? []).map((tag) => <span key={`tag-${tag}`} className="tag">#{tag}</span>)}
+          {(note.mentions ?? []).map((mention) => <span key={`at-${mention}`} className="tag">@{mention}</span>)}
         </div>
+      )}
+      <QuickBar onWrap={applyWrap} onTemplates={() => setTemplatesOpen(true)} onFormat={formatNow} onDisperse={() => setDisperseOpen(true)} onSnippet={() => {
+        const area = sourceRef.current;
+        const text = mode === 'source' && area && area.selectionEnd > area.selectionStart ? area.value.slice(area.selectionStart, area.selectionEnd) : '';
+        if (!text.trim()) {
+          toast('Select text in Source, then save it as a snippet.');
+          setMode('source');
+          return;
+        }
+        setSnippet(text);
+      }} />
+      {!!diagnostics.length && (
+        <ul className="diagnostics" data-testid="diagnostics">
+          {diagnostics.map((item) => <li key={`${item.kind}-${item.line}`}>{item.message}</li>)}
+        </ul>
       )}
       {!!words.length && (
         <div className="hl-chips">
@@ -262,6 +365,7 @@ export function NoteEditor({ note, folders, rules, commands, onChange, onBack, o
                 value={note.body}
                 spellCheck={false}
                 onChange={(event) => commit(withBody(note, event.target.value, nowIso()))}
+                onBlur={(event) => maybeFormat(event.target.value)}
                 onScroll={(event) => {
                   const back = event.currentTarget.previousElementSibling as HTMLElement | null;
                   if (back) {
@@ -276,7 +380,12 @@ export function NoteEditor({ note, folders, rules, commands, onChange, onBack, o
                 }}
                 onPointerDown={(event) => {
                   const area = event.currentTarget;
+                  const selected = area.selectionEnd > area.selectionStart ? area.value.slice(area.selectionStart, area.selectionEnd) : '';
                   const timer = window.setTimeout(() => {
+                    if (selected.trim()) {
+                      setSnippet(selected);
+                      return;
+                    }
                     const found = wordAt(area.value, area.selectionStart);
                     if (found) highlight(found.word);
                   }, 420);
@@ -320,6 +429,32 @@ export function NoteEditor({ note, folders, rules, commands, onChange, onBack, o
           ))}
         </div>
       </div>
+      {templatesOpen && (
+        <TemplateDrawer
+          templates={store.ws.settings.templates}
+          onClose={() => setTemplatesOpen(false)}
+          onInsert={insertTemplate}
+          onDelete={(id) => store.updateSettings({ templates: store.ws.settings.templates.filter((item) => item.id !== id) })}
+          onSave={(template) => {
+            const next = store.ws.settings.templates.some((item) => item.id === template.id)
+              ? store.ws.settings.templates.map((item) => (item.id === template.id ? { ...template, updated_at: nowIso() } : item))
+              : [...store.ws.settings.templates, { ...template, updated_at: nowIso() }];
+            store.updateSettings({ templates: next });
+          }}
+        />
+      )}
+      {snippet != null && <SnippetDialog selection={snippet} onClose={() => setSnippet(null)} onSave={saveSnippet} />}
+      {disperseOpen && (
+        <DisperseDialog
+          note={note}
+          notes={store.ws.notes}
+          folders={store.ws.folders}
+          rules={store.ws.settings.routing_rules}
+          aliases={store.ws.settings.keyword_aliases}
+          onClose={() => setDisperseOpen(false)}
+          onConfirm={confirmDisperse}
+        />
+      )}
     </article>
   );
 }

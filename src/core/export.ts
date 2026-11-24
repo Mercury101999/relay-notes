@@ -1,4 +1,6 @@
 import { parseNoteBody } from './parser';
+import { sanitizeAliases, sanitizeRules } from './routing';
+import { sanitizeTemplates } from './templates';
 import type { Bot, Folder, Note, QueueItem, Settings, SyncMode, Tombstone, Workspace } from './types';
 import { DEFAULT_PUBLISHABLE_KEY, DEFAULT_SUPABASE_URL } from './defaults';
 
@@ -16,7 +18,7 @@ export interface ExportFile {
   bots: Bot[];
   notes: Note[];
   queue_items: QueueItem[];
-  settings: Pick<Settings, 'theme' | 'voice_dictionary' | 'voice_commands_enabled' | 'updated_at'>;
+  settings: Pick<Settings, 'theme' | 'voice_dictionary' | 'voice_commands_enabled' | 'routing_rules' | 'keyword_aliases' | 'templates' | 'format_on_save' | 'updated_at'>;
   tombstones: Tombstone[];
 }
 
@@ -52,6 +54,8 @@ function asNote(row: unknown): Note {
     body,
     parsed_sections: parsed.sections,
     keywords: parsed.keywords,
+    tags: parsed.tags,
+    mentions: parsed.mentions,
     sync_mode: sync,
     triage_status: triage,
     ari_summary: typeof row.ari_summary === 'string' ? row.ari_summary : null,
@@ -142,6 +146,10 @@ export function exportWorkspace(ws: Workspace, exportedAt: string): string {
       theme: ws.settings.theme,
       voice_dictionary: ws.settings.voice_dictionary,
       voice_commands_enabled: ws.settings.voice_commands_enabled,
+      routing_rules: ws.settings.routing_rules,
+      keyword_aliases: ws.settings.keyword_aliases,
+      templates: ws.settings.templates,
+      format_on_save: ws.settings.format_on_save,
       updated_at: ws.settings.updated_at,
     },
     tombstones: ws.tombstones,
@@ -184,6 +192,10 @@ export function importWorkspace(text: string, previous: Workspace): Workspace {
       theme,
       voice_dictionary: dictionary,
       voice_commands_enabled: settings.voice_commands_enabled !== false,
+      routing_rules: sanitizeRules(settings.routing_rules),
+      keyword_aliases: sanitizeAliases(settings.keyword_aliases),
+      templates: Array.isArray(settings.templates) ? sanitizeTemplates(settings.templates) : previous.settings.templates,
+      format_on_save: settings.format_on_save === true,
       updated_at: typeof settings.updated_at === 'string' ? settings.updated_at : new Date().toISOString(),
       supabase_url: previous.settings.supabase_url || DEFAULT_SUPABASE_URL,
       supabase_publishable_key: previous.settings.supabase_publishable_key || DEFAULT_PUBLISHABLE_KEY,

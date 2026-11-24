@@ -1,4 +1,4 @@
-import type { Bot, Folder, Note, QueueItem, Settings, SyncMode, Tombstone, Workspace } from './types';
+import type { Bot, Folder, KeywordAlias, Note, QueueItem, RoutingRule, Settings, SnippetTemplate, SyncMode, Tombstone, Workspace } from './types';
 
 export interface NoteSyncPlan {
   push: Note[];
@@ -79,6 +79,10 @@ export function mergeSettings(local: Settings, remote: RemoteSettings | null): S
       theme: remote.theme,
       voice_dictionary: remote.voice_dictionary,
       voice_commands_enabled: remote.voice_commands_enabled,
+      routing_rules: remote.routing_rules,
+      keyword_aliases: remote.keyword_aliases,
+      templates: remote.templates,
+      format_on_save: remote.format_on_save,
       updated_at: remote.updated_at,
     };
   }
@@ -89,6 +93,10 @@ export interface RemoteSettings {
   theme: Settings['theme'];
   voice_dictionary: Settings['voice_dictionary'];
   voice_commands_enabled: boolean;
+  routing_rules: RoutingRule[];
+  keyword_aliases: KeywordAlias[];
+  templates: SnippetTemplate[];
+  format_on_save: boolean;
   updated_at: string;
 }
 
@@ -165,6 +173,10 @@ export async function executeSync(client: SyncClient, userId: string, local: Wor
       theme: settings.theme,
       voice_dictionary: settings.voice_dictionary,
       voice_commands_enabled: settings.voice_commands_enabled,
+      routing_rules: settings.routing_rules,
+      keyword_aliases: settings.keyword_aliases,
+      templates: settings.templates,
+      format_on_save: settings.format_on_save,
       updated_at: settings.updated_at,
     });
   }

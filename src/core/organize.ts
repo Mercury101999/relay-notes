@@ -1,4 +1,5 @@
-import type { Note, ParsedSection } from './types';
+import { canonicalKeyword } from './routing';
+import type { KeywordAlias, Note, ParsedSection } from './types';
 
 export interface OrganizedItem {
   noteId: string;
@@ -17,15 +18,16 @@ export interface KeywordGroup {
   subGroups: SubGroup[];
 }
 
-export function organizeByKeyword(notes: Pick<Note, 'id' | 'title' | 'parsed_sections'>[]): KeywordGroup[] {
+export function organizeByKeyword(notes: Pick<Note, 'id' | 'title' | 'parsed_sections'>[], aliases: KeywordAlias[] = []): KeywordGroup[] {
   const map = new Map<string, { display: string; items: OrganizedItem[] }>();
   for (const note of notes) {
     for (const section of note.parsed_sections) {
-      const key = section.keyword.trim().toLowerCase();
+      const display = canonicalKeyword(section.keyword, aliases);
+      const key = display.trim().toLowerCase();
       if (!key) continue;
       let group = map.get(key);
       if (!group) {
-        group = { display: section.keyword, items: [] };
+        group = { display, items: [] };
         map.set(key, group);
       }
       group.items.push({ noteId: note.id, noteTitle: note.title, section });
