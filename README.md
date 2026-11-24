@@ -22,6 +22,22 @@ and include (nested) parentheses.)
 
 Fold a keyword or a chapter without rewriting the source. Search by section, note, or folder. Long-press a word (or Alt-click) to mark every occurrence, then use the chips or the color ticks on the overview ruler to jump between them.
 
+The editor also has a sticky quick-wrap bar, a template clipboard, and three local organizing actions. **Format** tidies block spacing and leaves the note untouched when a `{`, `(`, `((`, or code fence is unclosed. **By keyword** can filter on a keyword, a sub-class, a `#tag`, or an `@bot`, then consolidate the chosen blocks into one note. **Disperse** previews every `Folder / Note / Section` destination and asks before a Local only block is written into a synced note. Undo for both actions is stored in IndexedDB.
+
+![Quick wrap](docs/screenshots/notes-quick-wrap.png)
+
+![Disperse dry-run](docs/screenshots/disperse-preview.png)
+
+````text
+Portfolio : StudyApp #pwa @PA -> Briefs / Weekly desk dump / triage {
+  overview: (A paragraph.)
+  code: ```ts
+const keep = () => { return (1); };
+```
+  guard: (( if (a) { b(); } ))
+}
+````
+
 ![Folded note with highlights](docs/screenshots/notes-editor-folded-highlight.png)
 
 Each note chooses its own sync:
@@ -42,11 +58,11 @@ Each note chooses its own sync:
 
 ![Bot detail](docs/screenshots/bots-detail.png)
 
-**Voice typing** records in memory, trims and cuts the waveform, then transcribes with Whisper tiny.en (quantized) in a worker. The model is not part of the install cache. The first transcription downloads it into `relay-voice-v1`, and that cache survives app-shell updates. Audio buffers are wiped on insert, discard, and close. A dictionary and spoken commands (“new line”, “period”, and the rest) live in settings and sync with the account.
+**Voice typing** records in memory, trims and cuts the waveform, then transcribes with Whisper tiny.en (quantized) in a worker. The model is not part of the install cache. The first transcription downloads it into `relay-voice-v1`, and that cache survives app-shell updates. Audio buffers are wiped on insert, discard, and close. A dictionary and spoken commands (“new line”, “period”, “open block”, “new chapter”, “end block”, and the rest) live in settings and sync with the account.
 
 ![Waveform trim](docs/screenshots/voice-trim.png)
 
-**Settings** holds the theme, email/password and magic-link sign-in, the publishable Supabase URL and key, sync, JSON export/import, and the fictional example workspace.
+**Settings** holds the theme, email/password and magic-link sign-in, the publishable Supabase URL and key, sync, the keyword routing table, canonical aliases, templates, format-on-save, JSON export/import, and the fictional example workspace.
 
 ![Settings](docs/screenshots/settings.png)
 
@@ -84,4 +100,4 @@ In the Supabase dashboard open **Authentication → URL Configuration** and add 
 
 ## Phase 2
 
-Settings includes a short note for what comes next: a press-and-hold snippet and template clipboard, and a Socandoo-style daily Journal with a star calendar.
+Writing tools in this version stay on the device: the shared block parser, routing rules, aliases, templates, format, consolidate, and disperse. A block from a Local only note is not written into a synced note unless the dry-run warning is confirmed, and a note created from a Local only source stays Local only. The Socandoo-style daily Journal with a star calendar is still ahead.

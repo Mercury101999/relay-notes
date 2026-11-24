@@ -3,8 +3,9 @@ import type { Session, SupabaseClient } from '@supabase/supabase-js';
 import { exampleWorkspace } from '../core/example';
 import { exportWorkspace, importWorkspace } from '../core/export';
 import { deleteFolder, moveFolder as reorderFolder, wouldCycle } from '../core/folders';
-import { emptySettings, emptyWorkspace, withBody } from '../core/factory';
+import { emptyWorkspace, upgradeSettings, withBody } from '../core/factory';
 import { idbGet, idbSet } from '../core/idb';
+import { applyUndo, type OrganizeUndo } from '../core/undo';
 import { executeSync } from '../core/sync';
 import { asSyncClient, createRelayClient } from '../core/supabase';
 import { nowIso } from '../core/time';
@@ -46,6 +47,9 @@ interface StoreValue {
   importJson: (text: string) => void;
   exportJson: () => string;
   clearWorkspace: () => void;
+  undo: OrganizeUndo | null;
+  commitOrganize: (notes: Workspace['notes'], folders: Workspace['folders'], snapshot: OrganizeUndo) => void;
+  undoOrganize: () => void;
 }
 
 const StoreContext = createContext<StoreValue | null>(null);
@@ -53,12 +57,11 @@ const StoreContext = createContext<StoreValue | null>(null);
 function normalize(raw: Partial<Workspace> | undefined): Workspace {
   const base = emptyWorkspace();
   if (!raw) return base;
-  const settings = { ...emptySettings(raw.settings?.updated_at ?? base.settings.updated_at), ...raw.settings };
-  if (settings.theme !== 'light' && settings.theme !== 'dark') settings.theme = 'dark';
+  const settings = upgradeSettings(raw.settings, raw.settings?.updated_at ?? base.settings.updated_at);
   return {
     folders: raw.folders ?? [],
     bots: raw.bots ?? [],
-    notes: (raw.notes ?? []).map((note) => withBody(note, note.body ?? '', note.updated_at)),
+    notes: (raw.notes ?? []).map((note) => withBody({ ...note, tags: note.tags ?? [], mentions: note.mentions ?? [] }, note.body ?? '', note.updated_at)),
     queue: raw.queue ?? [],
     tombstones: raw.tombstones ?? [],
     settings,
@@ -79,6 +82,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
   const [user, setUser] = useState<SessionUser | null>(null);
   const [sync, setSync] = useState<StoreValue['sync']>({ status: 'local', error: null, at: null });
+  const [undo, setUndo] = useState<OrganizeUndo | null>(null);
   const wsRef = useRef(ws);
   const userRef = useRef(user);
   const syncing = useRef(false);
@@ -101,6 +105,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       try {
         const saved = await idbGet<Workspace>('workspace');
         if (!cancel && saved) setWs(normalize(saved));
+        const snapshot = await idbGet<OrganizeUndo | null>('organize-undo');
+        if (!cancel && snapshot?.id) setUndo(snapshot);
       } catch {
         toast('Saved workspace could not be read. Starting empty.');
       } finally {
@@ -311,7 +317,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       ];
       setWs({ ...emptyWorkspace(), settings: { ...settings, updated_at: now }, tombstones });
     },
-  }), [ws, ready, user, sync, syncNow, client]);
+    undo,
+    commitOrganize(notes, folders, snapshot) {
+      setWs((current) => ({ ...current, notes, folders }));
+      setUndo(snapshot);
+      void idbSet('organize-undo', snapshot);
+    },
+    undoOrganize() {
+      const snapshot = undo;
+      if (!snapshot) return;
+      const now = nowIso();
+      setWs((current) => applyUndo(current, snapshot, now));
+      setUndo(null);
+      void idbSet('organize-undo', null);
+    },
+  }), [ws, ready, user, sync, syncNow, client, undo]);
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
 }

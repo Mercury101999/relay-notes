@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
 import { DEFAULT_PUBLISHABLE_KEY, DEFAULT_SUPABASE_URL } from '../core/defaults';
-import type { VoiceRule } from '../core/types';
+import { SPOKEN_COMMANDS } from '../core/dictation';
+import { TEMPLATE_CATEGORIES } from '../core/templates';
+import { nowIso } from '../core/time';
+import type { KeywordAlias, RoutingRule, SnippetTemplate, VoiceRule } from '../core/types';
 import { useStore } from '../state/store';
 import { modelCached, openTrimPreview, prepareModel, removeModel, MODEL_LABEL } from '../voice/voice';
 import { askConfirm, toast } from './toast';
@@ -49,6 +52,8 @@ export function SettingsPage() {
         <p className="muted small">Dark is the default. The choice stays on this device and syncs with your account when you are signed in.</p>
       </section>
 
+      <WritingSettings />
+
       <section className="card">
         <h2>Account</h2>
         {user ? (
@@ -94,8 +99,11 @@ export function SettingsPage() {
         <p className="muted">{MODEL_LABEL}. Audio is kept in memory only and wiped when you insert, discard, or close the recorder.</p>
         <label className="check-line">
           <input type="checkbox" checked={ws.settings.voice_commands_enabled} onChange={(event) => store.updateSettings({ voice_commands_enabled: event.target.checked })} />
-          Spoken commands (new line, period, comma, question mark, and the rest)
+          Spoken commands
         </label>
+        <ul className="muted small">
+          {SPOKEN_COMMANDS.map((command) => <li key={command.phrase}><strong>{command.phrase}</strong> — {command.effect}</li>)}
+        </ul>
         <h3>Dictionary</h3>
         {dict.map((rule, index) => (
           <div className="dict-row" key={index}>
@@ -152,7 +160,7 @@ export function SettingsPage() {
 
       <section className="card phase2">
         <h2>Phase 2 roadmap</h2>
-        <p>Phase 2 will add a full press-and-hold snippet and template clipboard, plus a Socandoo-style daily Journal with a star calendar.</p>
+        <p>Phase 2 will add a Socandoo-style daily Journal with a star calendar. Routing, templates, formatting, and disperse are already in this version.</p>
       </section>
     </section>
   );
@@ -161,6 +169,117 @@ export function SettingsPage() {
 async function maybeExample(hasData: boolean, load: () => void) {
   if (hasData && !(await askConfirm('Replace the local workspace with the fictional example?', 'Load example'))) return;
   load();
+}
+
+function WritingSettings() {
+  const store = useStore();
+  const { routing_rules: rules, keyword_aliases: aliases, templates, format_on_save: formatOnSave } = store.ws.settings;
+  return (
+    <>
+      <section className="card">
+        <h2>Writing</h2>
+        <label className="check-line">
+          <input type="checkbox" checked={formatOnSave} onChange={(event) => store.updateSettings({ format_on_save: event.target.checked })} />
+          Format on save
+        </label>
+        <p className="muted small">Off by default. When it is on, leaving the source editor formats the note. Unclosed blocks are never rewritten.</p>
+      </section>
+      <section className="card" data-testid="routing-rules">
+        <h2>Keyword routing</h2>
+        <p className="muted small">Exact <code>Keyword : SubClass</code> wins over <code>Keyword : *</code>, which wins over <code>* : *</code>. Use {'{Keyword}'}, {'{SubClass}'}, and {'{Chapter}'} in the targets.</p>
+        {rules.map((rule, index) => (
+          <div className="stack" key={rule.id}>
+            <div className="dict-row">
+              <input aria-label="Rule keyword" value={rule.keyword} placeholder="Keyword" onChange={(event) => store.updateSettings({ routing_rules: replaceRule(rules, index, { keyword: event.target.value }) })} />
+              <span>:</span>
+              <input aria-label="Rule subclass" value={rule.sub_class} placeholder="* or subclass" onChange={(event) => store.updateSettings({ routing_rules: replaceRule(rules, index, { sub_class: event.target.value }) })} />
+              <button type="button" className="text-btn" onClick={() => store.updateSettings({ routing_rules: rules.filter((item) => item.id !== rule.id) })}>Remove</button>
+            </div>
+            <div className="dest-grid">
+              <input aria-label="Rule folder" value={rule.folder} placeholder="Folder" onChange={(event) => store.updateSettings({ routing_rules: replaceRule(rules, index, { folder: event.target.value }) })} />
+              <input aria-label="Rule note" value={rule.note} placeholder="Note" onChange={(event) => store.updateSettings({ routing_rules: replaceRule(rules, index, { note: event.target.value }) })} />
+              <input aria-label="Rule section" value={rule.section} placeholder="Section" onChange={(event) => store.updateSettings({ routing_rules: replaceRule(rules, index, { section: event.target.value }) })} />
+            </div>
+          </div>
+        ))}
+        <button type="button" className="btn ghost" onClick={() => store.updateSettings({ routing_rules: [...rules, blankRule()] })}>Add rule</button>
+      </section>
+      <section className="card" data-testid="keyword-aliases">
+        <h2>Keyword aliases</h2>
+        <p className="muted small">Variants such as “relay notes” map to one canonical keyword so groups and folders do not split.</p>
+        {aliases.map((alias, index) => (
+          <div className="dict-row" key={alias.id}>
+            <input aria-label="Alias" value={alias.alias} placeholder="relay notes" onChange={(event) => store.updateSettings({ keyword_aliases: replaceAlias(aliases, index, { alias: event.target.value }) })} />
+            <span>→</span>
+            <input aria-label="Canonical keyword" value={alias.canonical} placeholder="RelayNotes" onChange={(event) => store.updateSettings({ keyword_aliases: replaceAlias(aliases, index, { canonical: event.target.value }) })} />
+            <button type="button" className="text-btn" onClick={() => store.updateSettings({ keyword_aliases: aliases.filter((item) => item.id !== alias.id) })}>Remove</button>
+          </div>
+        ))}
+        <button type="button" className="btn ghost" onClick={() => store.updateSettings({ keyword_aliases: [...aliases, { id: crypto.randomUUID(), alias: '', canonical: '' }] })}>Add alias</button>
+      </section>
+      <TemplateSettings templates={templates} onChange={(next) => store.updateSettings({ templates: next })} />
+    </>
+  );
+}
+
+function TemplateSettings({ templates, onChange }: { templates: SnippetTemplate[]; onChange: (next: SnippetTemplate[]) => void }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <section className="card">
+      <h2>Template clipboard</h2>
+      {TEMPLATE_CATEGORIES.map((category) => {
+        const rows = templates.filter((template) => template.category === category);
+        if (!rows.length) return null;
+        return (
+          <div key={category}>
+            <h3>{category}</h3>
+            {rows.map((template) => (
+              <div key={template.id} className="sub-item">
+                <span>{template.name}</span>
+                <button type="button" className="text-btn" onClick={() => onChange(templates.filter((item) => item.id !== template.id))}>Delete</button>
+              </div>
+            ))}
+          </div>
+        );
+      })}
+      {open && <NewTemplate onSave={(template) => { onChange([...templates, template]); setOpen(false); }} onCancel={() => setOpen(false)} />}
+      {!open && <button type="button" className="btn ghost" onClick={() => setOpen(true)}>Add template</button>}
+    </section>
+  );
+}
+
+function NewTemplate({ onSave, onCancel }: { onSave: (template: SnippetTemplate) => void; onCancel: () => void }) {
+  const [category, setCategory] = useState<string>('Custom Snippets');
+  const [name, setName] = useState('');
+  const [body, setBody] = useState('');
+  return (
+    <div className="stack">
+      <label className="field">Category
+        <select aria-label="New template category" value={category} onChange={(event) => setCategory(event.target.value)}>
+          {TEMPLATE_CATEGORIES.map((item) => <option key={item}>{item}</option>)}
+        </select>
+      </label>
+      <label className="field">Name<input aria-label="New template name" value={name} onChange={(event) => setName(event.target.value)} /></label>
+      <label className="field">Body<textarea aria-label="New template body" value={body} onChange={(event) => setBody(event.target.value)} /></label>
+      <div className="row">
+        <button type="button" className="btn ghost" onClick={onCancel}>Cancel</button>
+        <button type="button" className="btn" onClick={() => onSave({ id: crypto.randomUUID(), category, name: name.trim() || 'Snippet', body, updated_at: nowIso() })}>Save template</button>
+      </div>
+    </div>
+  );
+}
+
+function blankRule(): RoutingRule {
+  const now = nowIso();
+  return { id: crypto.randomUUID(), keyword: '', sub_class: '*', folder: '', note: '', section: '', created_at: now, updated_at: now };
+}
+
+function replaceRule(rules: RoutingRule[], index: number, patch: Partial<RoutingRule>): RoutingRule[] {
+  return rules.map((rule, i) => (i === index ? { ...rule, ...patch, updated_at: nowIso() } : rule));
+}
+
+function replaceAlias(aliases: KeywordAlias[], index: number, patch: Partial<KeywordAlias>): KeywordAlias[] {
+  return aliases.map((alias, i) => (i === index ? { ...alias, ...patch } : alias));
 }
 
 function download(json: string) {

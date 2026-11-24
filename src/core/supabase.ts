@@ -1,4 +1,6 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { sanitizeAliases, sanitizeRules } from './routing';
+import { sanitizeTemplates } from './templates';
 import type { RemoteSettings, SyncClient } from './sync';
 
 export function createRelayClient(url: string, key: string): SupabaseClient {
@@ -23,6 +25,10 @@ function asSettings(row: Record<string, unknown> | null): RemoteSettings | null 
     theme,
     voice_dictionary,
     voice_commands_enabled: row.voice_commands_enabled !== false,
+    routing_rules: sanitizeRules(row.routing_rules),
+    keyword_aliases: sanitizeAliases(row.keyword_aliases),
+    templates: sanitizeTemplates(row.templates),
+    format_on_save: row.format_on_save === true,
     updated_at: typeof row.updated_at === 'string' ? row.updated_at : new Date(0).toISOString(),
   };
 }

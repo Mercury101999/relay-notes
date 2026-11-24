@@ -144,6 +144,25 @@ export function applyCommands(text: string): string {
   return next;
 }
 
+/** Block-structure phrases. Applied after tidy so the inserted whitespace survives. */
+export function applyStructureCommands(text: string): string {
+  return text
+    .replace(/\bopen block\b/gi, 'Keyword : SubClass {\n  chapter: (')
+    .replace(/\bnew chapter\b/gi, '\n  chapter: (')
+    .replace(/\bend block\b/gi, '\n}\n');
+}
+
+export const SPOKEN_COMMANDS: { phrase: string; effect: string }[] = [
+  { phrase: 'new line', effect: 'Insert a line break' },
+  { phrase: 'new paragraph', effect: 'Insert a blank line' },
+  { phrase: 'period', effect: 'Insert a period' },
+  { phrase: 'comma', effect: 'Insert a comma' },
+  { phrase: 'question mark', effect: 'Insert a question mark' },
+  { phrase: 'open block', effect: 'Start a Keyword : SubClass block' },
+  { phrase: 'new chapter', effect: 'Insert a chapter line' },
+  { phrase: 'end block', effect: 'Close the open block' },
+];
+
 /** Spacing and capitalisation cleanup. */
 export function tidy(text: string): string {
   return text
@@ -162,5 +181,7 @@ export function postProcess(raw: string, rules: Rule[], commands: boolean): stri
   let text = raw.replace(/\[(?:BLANK_AUDIO|MUSIC|NOISE|INAUDIBLE)\]|\((?:music|silence)\)/gi, ' ').trim();
   text = applyRules(text, rules);
   if (commands) text = applyCommands(text);
-  return tidy(text);
+  text = tidy(text);
+  if (commands) text = applyStructureCommands(text);
+  return text;
 }
