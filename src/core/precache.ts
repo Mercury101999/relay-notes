@@ -14,3 +14,6 @@ export function shouldPrecache(file: string): boolean {
 }
 
 export const VOICE_CACHE = 'relay-voice-v1';
+
+/** Bump to force every client onto a fresh app-shell cache. */
+export const SHELL_REVISION = 'r2-sync-order';

@@ -108,10 +108,19 @@ export interface SyncClient {
   upsertSettings(row: Record<string, unknown>): Promise<void>;
 }
 
+export type SyncTable = 'folders' | 'bots' | 'notes' | 'queue_items' | 'user_settings';
+
+export interface SyncTableError {
+  table: SyncTable;
+  message: string;
+}
+
 export interface SyncOutcome {
   workspace: Workspace;
   pushedNoteIds: string[];
   deletedNoteIds: string[];
+  /** Tables that failed this run. Other tables still synced. */
+  errors: SyncTableError[];
 }
 
 function stamp<T extends { user_id: string | null }>(rows: T[], userId: string): T[] {
@@ -122,25 +131,124 @@ function tombstoneSet(list: Tombstone[], table: Tombstone['table']): Set<string>
   return new Set(list.filter((item) => item.table === table).map((item) => item.id));
 }
 
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Orders folders so a parent is always written before its children. Cycles keep input order. */
+export function sortFoldersTopologically<T extends { id: string; parent_id: string | null }>(rows: T[]): T[] {
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const out: T[] = [];
+  const done = new Set<string>();
+  const visiting = new Set<string>();
+  const visit = (row: T) => {
+    if (done.has(row.id) || visiting.has(row.id)) return;
+    visiting.add(row.id);
+    const parent = row.parent_id ? byId.get(row.parent_id) : undefined;
+    if (parent) visit(parent);
+    visiting.delete(row.id);
+    done.add(row.id);
+    out.push(row);
+  };
+  rows.forEach(visit);
+  return out;
+}
+
+/**
+ * Copies of folder rows for upload. A parent that is neither on the server nor in this upload is
+ * sent as null so the foreign key holds. Local rows are not changed.
+ */
+export function folderPayload(push: Folder[], serverFolderIds: Set<string>): Folder[] {
+  const ids = new Set<string>([...serverFolderIds, ...push.map((row) => row.id)]);
+  return sortFoldersTopologically(push).map((row) => (
+    row.parent_id && !ids.has(row.parent_id) ? { ...row, parent_id: null } : { ...row }
+  ));
+}
+
+/** Copies of note rows for upload with folder_id cleared when the folder is not on the server. */
+export function notePayload(push: Note[], serverFolderIds: Set<string>): Note[] {
+  return push.map((row) => (
+    row.folder_id && !serverFolderIds.has(row.folder_id) ? { ...row, folder_id: null } : { ...row }
+  ));
+}
+
+/** Copies of queue rows with source_note_id cleared when that note is local-only or not on the server. */
+export function queuePayload(push: QueueItem[], serverNoteIds: Set<string>, localOnlyIds: Set<string>): QueueItem[] {
+  return push.map((row) => (
+    row.source_note_id && (localOnlyIds.has(row.source_note_id) || !serverNoteIds.has(row.source_note_id))
+      ? { ...row, source_note_id: null }
+      : { ...row }
+  ));
+}
+
+async function load<T>(table: SyncTable, run: () => Promise<T>, errors: SyncTableError[]): Promise<T | null> {
+  try {
+    return await run();
+  } catch (error) {
+    errors.push({ table, message: message(error) });
+    return null;
+  }
+}
+
+/**
+ * Pulls every table, merges, then writes in foreign-key order. Deletes run children first
+ * (queue_items, notes, bots, folders). Upserts run parents first (folders, notes, bots,
+ * queue_items, user_settings). Each table has its own error, and one failure does not stop the
+ * rest. Tombstones clear only for tables whose delete succeeded.
+ */
 export async function executeSync(client: SyncClient, userId: string, local: Workspace): Promise<SyncOutcome> {
-  const [remoteFolders, remoteBots, remoteNotesRaw, remoteQueue, remoteSettings] = await Promise.all([
-    client.select('folders') as Promise<Folder[]>,
-    client.select('bots') as Promise<Bot[]>,
-    client.select('notes') as Promise<Note[]>,
-    client.select('queue_items') as Promise<QueueItem[]>,
-    client.selectSettings(),
+  const errors: SyncTableError[] = [];
+  const failed = (table: SyncTable) => errors.some((item) => item.table === table);
+  const fail = (table: SyncTable, error: unknown) => { if (!failed(table)) errors.push({ table, message: message(error) }); };
+
+  const [remoteFoldersRaw, remoteBotsRaw, remoteNotesRaw, remoteQueueRaw, remoteSettings] = await Promise.all([
+    load('folders', () => client.select('folders') as Promise<Folder[]>, errors),
+    load('bots', () => client.select('bots') as Promise<Bot[]>, errors),
+    load('notes', () => client.select('notes') as Promise<Note[]>, errors),
+    load('queue_items', () => client.select('queue_items') as Promise<QueueItem[]>, errors),
+    load('user_settings', () => client.selectSettings(), errors),
   ]);
-  const remoteNotes = remoteNotesRaw.filter((note) => note && typeof note.id === 'string');
+  const foldersLoaded = remoteFoldersRaw !== null;
+  const botsLoaded = remoteBotsRaw !== null;
+  const notesLoaded = remoteNotesRaw !== null;
+  const queueLoaded = remoteQueueRaw !== null;
+  const settingsLoaded = !failed('user_settings');
+  const remoteFolders = remoteFoldersRaw ?? [];
+  const remoteBots = remoteBotsRaw ?? [];
+  const remoteQueue = remoteQueueRaw ?? [];
+  const remoteNotes = (remoteNotesRaw ?? []).filter((note) => note && typeof note.id === 'string');
 
   const folderTomb = tombstoneSet(local.tombstones, 'folders');
   const botTomb = tombstoneSet(local.tombstones, 'bots');
   const noteTomb = tombstoneSet(local.tombstones, 'notes');
   const queueTomb = tombstoneSet(local.tombstones, 'queue_items');
 
-  const notes = mergeNotes(local.notes, remoteNotes, noteTomb);
+  const remoteFolderIds = new Set(remoteFolders.map((row) => row.id));
+  const mergedNotes = mergeNotes(local.notes, remoteNotes, noteTomb);
+  // A null folder_id on the server can come from an earlier upload that cleared a folder the
+  // server did not have yet. Keep the local folder in that case.
+  const localById = new Map(local.notes.map((row) => [row.id, row]));
+  const notes = mergedNotes.map((row) => {
+    const mine = localById.get(row.id);
+    if (mine && mine !== row && row.folder_id === null && mine.folder_id && foldersLoaded && !remoteFolderIds.has(mine.folder_id)) {
+      return { ...row, folder_id: mine.folder_id };
+    }
+    return row;
+  });
   const folders = mergeRows(local.folders, remoteFolders, folderTomb);
   const bots = mergeRows(local.bots, remoteBots, botTomb);
-  const queue = mergeRows(local.queue, remoteQueue, queueTomb);
+  const remoteNoteIdSet = new Set(remoteNotes.map((row) => row.id));
+  const localOnlyNoteIds = new Set(notes.filter((row) => row.sync_mode === 'local').map((row) => row.id));
+  const localQueueById = new Map(local.queue.map((row) => [row.id, row]));
+  // Same rule for queue links to a note the server does not hold: keep the on-device link.
+  const queue = mergeRows(local.queue, remoteQueue, queueTomb).map((row) => {
+    const mine = localQueueById.get(row.id);
+    if (mine && mine !== row && row.source_note_id === null && mine.source_note_id && notesLoaded
+      && (localOnlyNoteIds.has(mine.source_note_id) || !remoteNoteIdSet.has(mine.source_note_id))) {
+      return { ...row, source_note_id: mine.source_note_id };
+    }
+    return row;
+  });
   const settings = mergeSettings(local.settings, remoteSettings);
 
   const notePlan = planNoteSync(notes, remoteNotes, [...noteTomb]);
@@ -148,46 +256,101 @@ export async function executeSync(client: SyncClient, userId: string, local: Wor
     const remote = remoteNotes.find((item) => item.id === note.id);
     return !remote || note.updated_at > remote.updated_at;
   }), userId));
-
   const pushFolders = stamp(rowsToPush(folders, remoteFolders), userId);
   const pushBots = stamp(rowsToPush(bots, remoteBots), userId);
   const pushQueue = stamp(rowsToPush(queue, remoteQueue), userId);
 
+  const queueDeletes = [...queueTomb].filter((id) => remoteQueue.some((row) => row.id === id));
   const folderDeletes = [...folderTomb].filter((id) => remoteFolders.some((row) => row.id === id));
   const botDeletes = [...botTomb].filter((id) => remoteBots.some((row) => row.id === id));
-  const queueDeletes = [...queueTomb].filter((id) => remoteQueue.some((row) => row.id === id));
 
-  await client.remove('notes', notePlan.deleteIds);
-  await client.remove('folders', folderDeletes);
-  await client.remove('bots', botDeletes);
-  await client.remove('queue_items', queueDeletes);
-  await client.upsert('notes', pushNotes);
-  await client.upsert('folders', pushFolders);
-  await client.upsert('bots', pushBots);
-  await client.upsert('queue_items', pushQueue);
+  const removed = new Set<string>();
+  const clearedTables = new Set<Tombstone['table']>();
+  const remove = async (table: Exclude<SyncTable, 'user_settings'>, ids: string[], loaded: boolean) => {
+    if (!loaded) return false;
+    try {
+      await client.remove(table, ids);
+      ids.forEach((id) => removed.add(id));
+      clearedTables.add(table);
+      return true;
+    } catch (error) {
+      fail(table, error);
+      return false;
+    }
+  };
 
-  const settingsChanged = !remoteSettings || settings.updated_at > remoteSettings.updated_at;
-  if (settingsChanged) {
-    await client.upsertSettings({
-      user_id: userId,
-      theme: settings.theme,
-      voice_dictionary: settings.voice_dictionary,
-      voice_commands_enabled: settings.voice_commands_enabled,
-      routing_rules: settings.routing_rules,
-      keyword_aliases: settings.keyword_aliases,
-      templates: settings.templates,
-      format_on_save: settings.format_on_save,
-      updated_at: settings.updated_at,
-    });
+  // Deletes: children before parents.
+  await remove('queue_items', queueDeletes, queueLoaded);
+  const notesDeleted = await remove('notes', notePlan.deleteIds, notesLoaded);
+  await remove('bots', botDeletes, botsLoaded);
+  const foldersDeleted = await remove('folders', folderDeletes, foldersLoaded);
+
+  // Folder ids the server has now. A failed folder delete leaves those rows in place.
+  const serverFolderIds = new Set([...remoteFolderIds].filter((id) => !foldersDeleted || !folderDeletes.includes(id)));
+
+  // Upserts: parents before children.
+  if (foldersLoaded) {
+    try {
+      const payload = folderPayload(pushFolders.filter((row) => !folderTomb.has(row.id)), serverFolderIds);
+      await client.upsert('folders', payload);
+      payload.forEach((row) => serverFolderIds.add(row.id));
+    } catch (error) {
+      fail('folders', error);
+    }
   }
 
-  const removed = new Set<string>([
-    ...notePlan.deleteIds,
-    ...folderDeletes,
-    ...botDeletes,
-    ...queueDeletes,
-  ]);
-  const tombstones = local.tombstones.filter((item) => !removed.has(item.id));
+  const localOnlyIds = localOnlyNoteIds;
+  const serverNoteIds = new Set(remoteNotes.map((row) => row.id).filter((id) => !(notesDeleted && notePlan.deleteIds.includes(id))));
+  let pushedNoteIds: string[] = [];
+  if (notesLoaded) {
+    try {
+      const payload = assertNoLocalNotes(notePayload(pushNotes, serverFolderIds));
+      await client.upsert('notes', payload);
+      pushedNoteIds = payload.map((row) => row.id);
+      pushedNoteIds.forEach((id) => serverNoteIds.add(id));
+    } catch (error) {
+      fail('notes', error);
+    }
+  }
+
+  if (botsLoaded) {
+    try {
+      await client.upsert('bots', pushBots);
+    } catch (error) {
+      fail('bots', error);
+    }
+  }
+
+  // Queue links need the server's note list. Without it, wait for the next run.
+  if (queueLoaded && notesLoaded) {
+    try {
+      await client.upsert('queue_items', queuePayload(pushQueue, serverNoteIds, localOnlyIds));
+    } catch (error) {
+      fail('queue_items', error);
+    }
+  }
+
+  const settingsChanged = !remoteSettings || settings.updated_at > remoteSettings.updated_at;
+  if (settingsLoaded && settingsChanged) {
+    try {
+      await client.upsertSettings({
+        user_id: userId,
+        theme: settings.theme,
+        voice_dictionary: settings.voice_dictionary,
+        voice_commands_enabled: settings.voice_commands_enabled,
+        routing_rules: settings.routing_rules,
+        keyword_aliases: settings.keyword_aliases,
+        templates: settings.templates,
+        format_on_save: settings.format_on_save,
+        updated_at: settings.updated_at,
+      });
+    } catch (error) {
+      fail('user_settings', error);
+    }
+  }
+
+  // Tombstones clear per table, only for ids that table's successful delete covered.
+  const tombstones = local.tombstones.filter((item) => !(clearedTables.has(item.table) && removed.has(item.id)));
 
   return {
     workspace: {
@@ -198,7 +361,13 @@ export async function executeSync(client: SyncClient, userId: string, local: Wor
       settings,
       tombstones,
     },
-    pushedNoteIds: pushNotes.map((note) => note.id),
-    deletedNoteIds: notePlan.deleteIds,
+    pushedNoteIds,
+    deletedNoteIds: notesDeleted ? notePlan.deleteIds : [],
+    errors,
   };
+}
+
+/** Short text for the sync pill and Settings, naming each failed table. */
+export function describeSyncErrors(errors: SyncTableError[]): string {
+  return errors.map((item) => `${item.table}: ${item.message}`).join('; ');
 }

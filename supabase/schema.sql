@@ -4,6 +4,10 @@
 -- A server-side allowlist lives in the unexposed private schema. It is not part of this file
 -- and contains no personal data.
 --
+-- Sync writes in foreign-key order: deletes run queue_items, notes, bots, folders; upserts run
+-- folders (parents first), notes, bots, queue_items, user_settings. A note's folder_id or a queue
+-- item's source_note_id that the server does not hold is sent as null in the upload only.
+--
 -- Client rule: notes with sync_mode = 'local' are never uploaded. Only ari_inbox and
 -- ari_reference notes are written to public.notes. Switching a note back to local deletes
 -- the remote row and keeps the on-device copy.
@@ -138,6 +142,8 @@ alter table public.queue_items enable row level security;
 alter table public.user_settings enable row level security;
 
 revoke all on public.folders, public.bots, public.notes, public.queue_items, public.user_settings from anon;
+-- New tables in public do not pick up anon privileges by default either.
+alter default privileges for role postgres in schema public revoke all on tables from anon;
 grant select, insert, update, delete on public.folders, public.bots, public.notes, public.queue_items, public.user_settings to authenticated;
 
 do $$
